@@ -18,12 +18,12 @@ SECRET_KEY = "562de2311ff38d4b0543891bada2dfd931e8547071a0b25aa7f87c43ef1b4f43"
 ALGORITHM = "HS256"
 
 
-class createUsers(BaseModel):
+class CreateUser(BaseModel):
     email: str
     username: str
     password: str
     role: str
-    fastname: str
+    firstname: str
     lastname: str
 
 
@@ -50,8 +50,8 @@ def authenticate_user(username, password, db):
     return False
 
 
-def generate_access_token(username: str, user_id: str, expires: timedelta):
-    encode = {"sub": username, "id": user_id}
+def generate_access_token(username: str, user_id: str, role: str, expires: timedelta):
+    encode = {"sub": username, "id": user_id, "role": role}
     expires = datetime.now(timezone.utc) + expires
     encode.update({"exp": expires})
     return jwt.encode(encode, SECRET_KEY, algorithm=ALGORITHM)
@@ -62,9 +62,10 @@ def get_current_user(token: Annotated[str, Depends(OAuth2_barear)]):
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         user_id: int = payload.get("id")
+        role: str = payload.get("role")
         if username is None or user_id is None:
             raise HTTPException(status_code=404, detail="user not found!")
-        return {"username": username, "id": user_id}
+        return {"username": username, "id": user_id, "role": role}
     except:
         raise HTTPException(status_code=404, detail="user not found!")
 
@@ -82,7 +83,7 @@ db_dependency = Annotated[Session, Depends(get_db)]
 
 
 @router.post("/auth/register", status_code=status.HTTP_201_CREATED)
-def register_user(db: db_dependency, newUser: createUsers):
+def register_user(db: db_dependency, newUser: CreateUser):
     # 1. Check if user already exists
     existing_user = (
         db.query(Users)
@@ -96,10 +97,13 @@ def register_user(db: db_dependency, newUser: createUsers):
             detail="Username or email already exists",
         )
 
-    # 2. Hash password and create user
+    # 2. Hash password and include ALL model fields
     user_model = Users(
         email=newUser.email,
         username=newUser.username,
+        firstname=newUser.firstname,
+        lastname=newUser.lastname,
+        role=newUser.role,
         hashed_password=bcrypt_context.hash(newUser.password),
     )
 
@@ -116,7 +120,9 @@ def login(
     user = authenticate_user(form_data.username, form_data.password, db)
     if not user:
         return "Failed Authentication"
-    token = generate_access_token(user.username, user.id, timedelta(minutes=30))
+    token = generate_access_token(
+        user.username, user.id, user.role, timedelta(minutes=30)
+    )
     return {"access_token": token, "token_type": "bearer"}
 
 

@@ -6,13 +6,13 @@ from sqlalchemy.orm import Session
 import datetime
 from database import engine, sessionLocal
 import models
-from models import Books, Reservations
-from router import auth
+from models import Books, Reservations,IssueRecord
+from router import auth, admin
 from router.auth import get_current_user
 
 app = FastAPI()
 app.include_router(auth.router)
-
+app.include_router(admin.router, prefix="/admin")
 models.Base.metadata.create_all(bind=engine)
 
 
@@ -105,3 +105,27 @@ def my_reservation(user: user_dependency, db: db_dependency):
         )
 
     return reservations
+
+
+# ---------------------------------------------------------
+# MY ISSUED BOOKS (লগইন করা ইউজারের নিজস্ব ইস্যু করা বইয়ের তালিকা)
+# ---------------------------------------------------------
+@app.get("/my_issued_books", status_code=status.HTTP_200_OK)
+def get_my_issued_books(user: user_dependency, db: db_dependency):
+    # ১. ইউজার ভ্যালিডেশন
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            
+        )
+
+    user_id = user.get("id")
+
+    # ২. এই ইউজারের সব ইস্যু রেকর্ড এবং সাথে বইয়ের তথ্য বের করা
+    issued_records = (
+        db.query(IssueRecord)
+        .filter(IssueRecord.user_id == user_id, IssueRecord.status == 'issued')
+        .all()
+    )
+    return issued_records
