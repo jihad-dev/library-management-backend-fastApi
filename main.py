@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 import datetime
+from fastapi.middleware.cors import CORSMiddleware
 from database import engine, sessionLocal
 import models
 from models import Books, Reservations,IssueRecord
