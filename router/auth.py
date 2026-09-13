@@ -1,22 +1,25 @@
-from fastapi import APIRouter, HTTPException, status
-from typing import Annotated
-from fastapi import Depends
-from sqlalchemy.orm import Session
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 from database import sessionLocal
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError, jwt
 from models import Users
 from passlib.context import CryptContext
-from datetime import timedelta, datetime, timezone
-from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
-from jose import jwt
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 router = APIRouter()
+
 bcrypt_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 OAuth2_barear = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
 SECRET_KEY = "562de2311ff38d4b0543891bada2dfd931e8547071a0b25aa7f87c43ef1b4f43"
+REFRESH_SECRET_KEY = "798ab2311ff38d4b0543891bada2dfd931e8547071a0b25aa7f87c43ef1b999" # আলাদা সিক্রেট কি
 ALGORITHM = "HS256"
 
+
+# ---------------- Schema definitions ----------------
 
 class CreateUser(BaseModel):
     email: str
@@ -40,21 +43,29 @@ class PasswordUpdate(BaseModel):
     new_password: str
 
 
+# ---------------- Helper functions ----------------
+
 def authenticate_user(username, password, db):
     user = db.query(Users).filter(Users.username == username).first()
     if user is None:
         return False
     if bcrypt_context.verify(password, user.hashed_password):
         return user
-
     return False
 
 
-def generate_access_token(username: str, user_id: str, role: str, expires: timedelta):
+def generate_access_token(username: str, user_id: int, role: str, expires: timedelta):
     encode = {"sub": username, "id": user_id, "role": role}
-    expires = datetime.now(timezone.utc) + expires
-    encode.update({"exp": expires})
+    expires_time = datetime.now(timezone.utc) + expires
+    encode.update({"exp": expires_time})
     return jwt.encode(encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def generate_refresh_token(username: str, user_id: int, expires: timedelta):
+    encode = {"sub": username, "id": user_id}
+    expires_time = datetime.now(timezone.utc) + expires
+    encode.update({"exp": expires_time})
+    return jwt.encode(encode, REFRESH_SECRET_KEY, algorithm=ALGORITHM)
 
 
 def get_current_user(token: Annotated[str, Depends(OAuth2_barear)]):
@@ -64,10 +75,16 @@ def get_current_user(token: Annotated[str, Depends(OAuth2_barear)]):
         user_id: int = payload.get("id")
         role: str = payload.get("role")
         if username is None or user_id is None:
-            raise HTTPException(status_code=404, detail="user not found!")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, 
+                detail="Invalid credentials"
+            )
         return {"username": username, "id": user_id, "role": role}
-    except:
-        raise HTTPException(status_code=404, detail="user not found!")
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, 
+            detail="Could not validate credentials"
+        )
 
 
 def get_db():
@@ -82,9 +99,10 @@ user_dependency = Annotated[dict, Depends(get_current_user)]
 db_dependency = Annotated[Session, Depends(get_db)]
 
 
+# ---------------- Endpoints ----------------
+
 @router.post("/auth/register", status_code=status.HTTP_201_CREATED)
 def register_user(db: db_dependency, newUser: CreateUser):
-    # 1. Check if user already exists
     existing_user = (
         db.query(Users)
         .filter((Users.email == newUser.email) | (Users.username == newUser.username))
@@ -97,7 +115,6 @@ def register_user(db: db_dependency, newUser: CreateUser):
             detail="Username or email already exists",
         )
 
-    # 2. Hash password and include ALL model fields
     user_model = Users(
         email=newUser.email,
         username=newUser.username,
@@ -115,40 +132,103 @@ def register_user(db: db_dependency, newUser: CreateUser):
 
 @router.post("/auth/login")
 def login(
-    db: db_dependency, form_data: Annotated[OAuth2PasswordRequestForm, Depends()]
+    response: Response,
+    db: db_dependency, 
+    form_data: Annotated[OAuth2PasswordRequestForm, Depends()]
 ):
     user = authenticate_user(form_data.username, form_data.password, db)
     if not user:
-        return "Failed Authentication"
-    token = generate_access_token(
-        user.username, user.id, user.role, timedelta(minutes=30)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, 
+            detail="Incorrect username or password"
+        )
+    
+    # 1. Short-Lived Access Token (১৫ মিনিট)
+    access_token = generate_access_token(
+        user.username, user.id, user.role, timedelta(minutes=15)
     )
-    return {"access_token": token, "token_type": "bearer"}
+    
+    # 2. Long-Lived Refresh Token (৭ দিন)
+    refresh_token = generate_refresh_token(
+        user.username, user.id, timedelta(days=7)
+    )
+
+    # 3. HTTP-Only Cookie তে Refresh Token সেট করা
+    response.set_cookie(
+        key="refreshToken",
+        value=refresh_token,
+        httponly=True,
+        secure=True,     # Production (HTTPS)-এ True রাখতে হবে
+        samesite="none", # Cross-origin (React to Render Backend) রিকোয়েস্টের জন্য
+        max_age=7 * 24 * 60 * 60  # 7 days in seconds
+    )
+
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.post("/auth/refresh-token")
+def refresh_token_endpoint(
+    db: db_dependency, 
+    refreshToken: Optional[str] = None
+):
+    # নোট: ফ্রন্টএন্ড থেকে credentials: "include" দিলে কুকি থেকে স্বয়ংক্রিয়ভাবে পাওয়া যাবে
+    if not refreshToken:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, 
+            detail="Refresh token missing"
+        )
+
+    try:
+        payload = jwt.decode(refreshToken, REFRESH_SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        user_id: int = payload.get("id")
+        
+        if username is None or user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, 
+                detail="Invalid refresh token"
+            )
+
+        user = db.query(Users).filter(Users.id == user_id).first()
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, 
+                detail="User not found"
+            )
+
+        # নতুন Access Token ইস্যু
+        new_access_token = generate_access_token(
+            user.username, user.id, user.role, timedelta(minutes=15)
+        )
+
+        return {"access_token": new_access_token, "token_type": "bearer"}
+
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, 
+            detail="Invalid or expired refresh token"
+        )
+
+
+@router.post("/auth/logout")
+def logout(response: Response):
+    # কুকি রিমুভ করে দেওয়া
+    response.delete_cookie(key="refreshToken")
+    return {"message": "Logged out successfully"}
 
 
 @router.put("/updateuser")
 def update_user(user_update: UpdateUser, user: user_dependency, db: db_dependency):
-    # 1. Check authentication status
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Failed Authentication!"
-        )
-
-    # 2. Fetch user from database
     user_model = db.query(Users).filter(Users.id == user.get("id")).first()
 
-    # 3. Check if user record exists in database
     if user_model is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # 4. Extract only updated fields
     update_data = user_update.model_dump(exclude_unset=True)
 
-    # 5. Apply update attributes to the SQLAlchemy model
     for key, value in update_data.items():
         setattr(user_model, key, value)
 
-    # 6. Save changes to DB
     db.add(user_model)
     db.commit()
 
@@ -159,27 +239,16 @@ def update_user(user_update: UpdateUser, user: user_dependency, db: db_dependenc
 def change_password(
     update_password: PasswordUpdate, user: user_dependency, db: db_dependency
 ):
-    # 1. Check authentication status
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Failed Authentication!"
-        )
+    user_model = db.query(Users).filter(Users.id == user.get("id")).first()
+    if user_model is None:
+        raise HTTPException(status_code=401, detail="User not found")
 
-    # 2. Fetch user model from database
-    user = db.query(Users).filter(Users.id == user.get("id")).first()
-    if user is None:
-        raise HTTPException(status_code=401, detail="Failed Authentication!")
-
-    # 3. Verify current password
-    if not bcrypt_context.verify(update_password.old_password, user.hash_password):
+    if not bcrypt_context.verify(update_password.old_password, user_model.hashed_password):
         raise HTTPException(status_code=400, detail="Incorrect old password")
 
-    # 4. Hash and update new password
-    user.hash_password = bcrypt_context.hash(update_password.new_password)
+    user_model.hashed_password = bcrypt_context.hash(update_password.new_password)
 
-    # 5. Commit changes
-    db.add(user)
+    db.add(user_model)
     db.commit()
 
-    # 6. Return safe response (do NOT return the raw user model)
     return {"message": "Password changed successfully"}
