@@ -11,6 +11,20 @@ from router import auth, admin
 from router.auth import get_current_user
 
 app = FastAPI()
+# CORS কনফিগারেশন
+origins = [
+    "http://localhost:5173",  # আপনার React Frontend-এর URL
+    "http://127.0.0.1:5173",
+    # ভবিষ্যতে ফ্রন্টএন্ড লাইভ করলে সেই URL-ও এখানে দিয়ে দেবেন (যেমন: "https://my-app.vercel.app")
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,       # নির্দিষ্ট origins এলাউ করার জন্য (বা সব করতে ["*"])
+    allow_credentials=True,
+    allow_methods=["*"],         # GET, POST, PUT, DELETE ইত্যাদি সব এলাউ করবে
+    allow_headers=["*"],         # Authorization সহ সব Header এলাউ করবে
+)
 app.include_router(auth.router)
 app.include_router(admin.router, prefix="/admin")
 models.Base.metadata.create_all(bind=engine)
