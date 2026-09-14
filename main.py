@@ -82,23 +82,47 @@ def get_specific_book(book_id: int, db: db_dependency):
 # ---------------------------------------------------------
 @app.post("/reserve/{book_id}")
 def reserve_book(user: user_dependency, db: db_dependency, book_id: int):
+    # ১. অথেন্টিকেশন চেক
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication Failed")
     
+    # ২. বইটি ডেটাবেজে আছে কি না চেক
     book = db.query(Books).filter(Books.id == book_id).first()
     if book is None:
         raise HTTPException(status_code=404, detail="Book Not Found")
         
+    # 🔴 মূল সমস্যা ১: স্টক ০ বা তার কম থাকলে রিজার্ভ করতে দেওয়া যাবে না
+    if book.available_copies <= 0:
+        raise HTTPException(status_code=400, detail="Book is Out of Stock")
+
+    # 🔴 বাড়তি সুরক্ষা: ইউজার ইতিমধ্যে বইটি রিজার্ভ করেছে কি না চেক (Duplicate Reservation Prevent)
+    existing_reservation = db.query(Reservations).filter(
+        Reservations.book_id == book_id,
+        Reservations.user_id == user.get("id"),
+        Reservations.status == "pending"
+    ).first()
+
+    if existing_reservation:
+        raise HTTPException(status_code=400, detail="You have already reserved this book")
+
+    # ৩. রিজার্ভেশন তৈরি
     reservations_model = Reservations(
-        book_id=book_id, user_id=user.get("id"), status="pending"
+        book_id=book_id, 
+        user_id=user.get("id"), 
+        status="pending"
     )
     db.add(reservations_model)
+
+    # 🔴 মূল সমস্যা ২: বইয়ের available_copies ১ কমিয়ে দেওয়া
+    book.available_copies -= 1
+
+    # ৪. ডেটাবেজ সেভ/কমিক করা
     db.commit()
     
     return JSONResponse(
-        status_code=201, content={"message": "Book Reserved Successfully"}
+        status_code=201, 
+        content={"message": "Book Reserved Successfully"}
     )
-
 
 @app.delete("/reserve/cancel/{reservation_id}")
 def cancel_reservation(user: user_dependency, db: db_dependency, reservation_id: int):
