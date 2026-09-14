@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 from database import sessionLocal
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from models import Users
@@ -158,9 +158,9 @@ def login(
         key="refreshToken",
         value=refresh_token,
         httponly=True,
-        secure=True,     # Production (HTTPS)-এ True রাখতে হবে
-        samesite="none", # Cross-origin (React to Render Backend) রিকোয়েস্টের জন্য
-        max_age=7 * 24 * 60 * 60  # 7 days in seconds
+        secure=True,     # Production (HTTPS)-এ True
+        samesite="none", # Cross-origin এর জন্য
+        max_age=7 * 24 * 60 * 60  # 7 days
     )
 
     return {"access_token": access_token, "token_type": "bearer"}
@@ -169,13 +169,12 @@ def login(
 @router.post("/auth/refresh-token")
 def refresh_token_endpoint(
     db: db_dependency, 
-    refreshToken: Optional[str] = None
+    refreshToken: Annotated[Optional[str], Cookie()] = None # ✅ ফিক্স: Cookie() হিসেবে রিড করা হচ্ছে
 ):
-    # নোট: ফ্রন্টএন্ড থেকে credentials: "include" দিলে কুকি থেকে স্বয়ংক্রিয়ভাবে পাওয়া যাবে
     if not refreshToken:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
-            detail="Refresh token missing"
+            detail="Refresh token missing in cookies"
         )
 
     try:
@@ -212,8 +211,13 @@ def refresh_token_endpoint(
 
 @router.post("/auth/logout")
 def logout(response: Response):
-    # কুকি রিমুভ করে দেওয়া
-    response.delete_cookie(key="refreshToken")
+    # ✅ ফিক্স: কুকি ডিলিট করার সময় SameSite & Secure প্যারামিটার বজায় রাখা
+    response.delete_cookie(
+        key="refreshToken",
+        httponly=True,
+        secure=True,
+        samesite="none"
+    )
     return {"message": "Logged out successfully"}
 
 
