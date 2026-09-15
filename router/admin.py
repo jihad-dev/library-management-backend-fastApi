@@ -134,6 +134,7 @@ def update_book(
 # ---------------------------------------------------------
 @router.delete("/delete_book/{book_id}", status_code=status.HTTP_200_OK)
 def delete_book(book_id: int, user: user_dependency, db: db_dependency):
+    # ১. অথেন্টিকেশন ও রোল চেক
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -147,17 +148,31 @@ def delete_book(book_id: int, user: user_dependency, db: db_dependency):
             detail="Forbidden: Librarian access required.",
         )
 
+    # ২. বইটি ডাটাবেজে আছে কিনা চেক
     book_model = db.query(Books).filter(Books.id == book_id).first()
     if book_model is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Book not found"
         )
 
-    db.delete(book_model)
-    db.commit()
+    # ৩. ডাটাবেজ ডিলিট ও সেফটি হ্যান্ডলিং
+    try:
+        db.delete(book_model)
+        db.commit()
+    except IntegrityError:
+        db.rollback() # ডাটাবেজ ক্র্যাশ হওয়া থেকে রক্ষা করবে
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete book! This book is currently issued or has active borrow records. Please return or delete the issue records first.",
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An unexpected error occurred: {str(e)}"
+        )
 
     return {"message": f"Book with ID {book_id} deleted successfully"}
-
 
 @router.post("/create_issue", status_code=status.HTTP_201_CREATED)
 def create_issue(user: user_dependency, db: db_dependency, issue_request: IssuBook):
