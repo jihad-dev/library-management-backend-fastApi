@@ -1,12 +1,12 @@
-from fastapi import APIRouter, HTTPException, status
-from typing import Annotated
-from fastapi import Depends
-from sqlalchemy.orm import Session
+from datetime import datetime, timedelta
 from typing import Annotated, Optional
-from database import sessionLocal
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from models import  Books, Reservations, IssueRecord
-from datetime import timedelta, datetime
+from sqlalchemy.exc import IntegrityError  # <--- মিসিং ইম্পোর্টটি যুক্ত করা হয়েছে
+from sqlalchemy.orm import Session
+
+from database import sessionLocal
+from models import Books, IssueRecord, Reservations
 from router.auth import get_current_user
 
 router = APIRouter()
@@ -24,7 +24,7 @@ class CreateBook(BaseModel):
 
 
 # ---------------------------------------------------------
-# UPDATE BOOK (বইয়ের তথ্য আপডেট করার জন্য)
+# UPDATE BOOK (বইয়ের তথ্য আপডেট করার জন্য)
 # ---------------------------------------------------------
 class UpdateBook(BaseModel):
     title: Optional[str] = None
@@ -55,7 +55,7 @@ user_dependency = Annotated[dict, Depends(get_current_user)]
 db_dependency = Annotated[Session, Depends(get_db)]
 
 
-# Updated route decorator path (removes double /admin)
+# Updated route decorator path
 @router.post("/create_book", status_code=status.HTTP_201_CREATED)
 def create_book(user: user_dependency, db: db_dependency, new_book: CreateBook):
     # Missing or invalid token
@@ -112,7 +112,7 @@ def update_book(
         copies_difference = update_data["total_copies"] - book_model.total_copies
         book_model.available_copies += copies_difference
 
-        # যদি নতুন total_copies ইতোমধ্যে ইস্যু করা কপির চেয়ে কম হয়
+        # যদি নতুন total_copies ইতোমধ্যে ইস্যু করা কপির চেয়ে কম হয়
         if book_model.available_copies < 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -160,7 +160,7 @@ def delete_book(book_id: int, user: user_dependency, db: db_dependency):
         db.delete(book_model)
         db.commit()
     except IntegrityError:
-        db.rollback() # ডাটাবেজ ক্র্যাশ হওয়া থেকে রক্ষা করবে
+        db.rollback()  # ডাটাবেজ ক্র্যাশ হওয়া থেকে রক্ষা করবে
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete book! This book is currently issued or has active borrow records. Please return or delete the issue records first.",
@@ -169,10 +169,11 @@ def delete_book(book_id: int, user: user_dependency, db: db_dependency):
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An unexpected error occurred: {str(e)}"
+            detail=f"An unexpected error occurred: {str(e)}",
         )
 
     return {"message": f"Book with ID {book_id} deleted successfully"}
+
 
 @router.post("/create_issue", status_code=status.HTTP_201_CREATED)
 def create_issue(user: user_dependency, db: db_dependency, issue_request: IssuBook):
@@ -216,7 +217,7 @@ def create_issue(user: user_dependency, db: db_dependency, issue_request: IssuBo
         status="issued",
     )
 
-    # ৫. বইয়ের স্টক ১ টি কমানো
+    # ৫. বইয়ের স্টক ১ টি কমানো
     book.available_copies -= 1
 
     # ৬. ইউজার যদি আগে রিজার্ভ করে থাকে তবে তা আপডেট করা
@@ -268,7 +269,7 @@ def return_book(issue_id: int, user: user_dependency, db: db_dependency):
             detail="Active issue record not found or book already returned.",
         )
 
-    # ৩. সংশ্লিষ্ট বইয়ের তথ্য খোঁজা
+    # ৩. সংশ্লিষ্ট বইয়ের তথ্য খোঁজা
     book = db.query(Books).filter(Books.id == issue_record.book_id).first()
     if book is None:
         raise HTTPException(
@@ -281,13 +282,13 @@ def return_book(issue_id: int, user: user_dependency, db: db_dependency):
     issue_record.return_date = return_time
     issue_record.status = "returned"
 
-    # যদি ফেরত দেওয়ার তারিখ Due Date পার হয়ে যায়
+    # যদি ফেরত দেওয়ার তারিখ Due Date পার হয়ে যায়
     if return_time > issue_record.due_date:
         overdue_days = (return_time - issue_record.due_date).days
         if overdue_days > 0:
             issue_record.fine_amount = overdue_days * DAILY_FINE_RATE
 
-    # ৫. বইয়ের স্টক ১ বাড়ানো (Available Copies)
+    # ৫. বইয়ের স্টক ১ বাড়ানো (Available Copies)
     book.available_copies += 1
 
     # ৬. ডাটাবেজে আপডেট সেভ করা
@@ -303,9 +304,8 @@ def return_book(issue_id: int, user: user_dependency, db: db_dependency):
         "fine_paid": issue_record.fine_paid,
     }
 
-    # ---------------------------------------------------------
 
-
+# ---------------------------------------------------------
 # PAY FINE (ইউজারের জরিমানা পরিশোধ চিহ্নিত করা)
 # ---------------------------------------------------------
 @router.put("/pay_fine/{issue_id}", status_code=status.HTTP_200_OK)
@@ -340,7 +340,7 @@ def pay_fine(issue_id: int, user: user_dependency, db: db_dependency):
             detail="There is no fine due for this record.",
         )
 
-    # ৪. ইতোমধ্যে পরিশোধ করা হয়ে গেছে কিনা তা চেক করা
+    # ৪. ইতোমধ্যে পরিশোধ করা হয়ে গেছে কিনা তা চেক করা
     if issue_record.fine_paid:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
